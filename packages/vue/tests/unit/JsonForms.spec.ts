@@ -2,6 +2,7 @@ import {
   Actions,
   JsonFormsUISchemaRegistryEntry,
   Generate,
+  Middleware,
 } from '@jsonforms/core';
 import { shallowMount } from '@vue/test-utils';
 import { nextTick } from 'vue';
@@ -101,6 +102,22 @@ describe('JsonForms.vue', () => {
 
     const updateEvents = wrapper.emitted('update:data');
     expect(updateEvents?.[updateEvents.length - 1]?.[0]).toEqual({ number: 6 });
+  });
+
+  it('emits middleware-transformed data on mount', () => {
+    const middleware: Middleware = (state, action, defaultReducer) => ({
+      ...defaultReducer(state, action),
+      data: { number: 6 },
+    });
+    const renderers: JsonFormsUISchemaRegistryEntry[] = [];
+    const wrapper = shallowMount(
+      JsonForms,
+      bindings({
+        props: { data: { number: 5.5 }, renderers, middleware },
+      })
+    );
+
+    expect(wrapper.emitted('update:data')).toEqual([[{ number: 6 }]]);
   });
 
   it('keeps the data prop authoritative when additionalErrors change', async () => {
@@ -206,6 +223,26 @@ describe('JsonForms.vue', () => {
     expect((wrapper.vm as any).jsonforms.core.schema).toEqual(
       Generate.jsonSchema(nextData)
     );
+  });
+
+  it('does not replace a false schema when data changes', async () => {
+    const renderers: JsonFormsUISchemaRegistryEntry[] = [];
+    const wrapper = shallowMount(
+      JsonForms,
+      bindings({
+        props: {
+          data: { number: 5.5 },
+          schema: false,
+          uischema: { type: 'VerticalLayout', elements: [] },
+          renderers,
+        },
+      })
+    );
+
+    await wrapper.setProps({ data: { number: 6 } });
+
+    expect((wrapper.vm as any).schemaToUse).toBe(false);
+    expect((wrapper.vm as any).jsonforms.core.schema).toBe(false);
   });
 
   it('does not regenerate schema and uischema when external data keeps the same schema', async () => {

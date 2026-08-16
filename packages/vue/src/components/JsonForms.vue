@@ -36,7 +36,6 @@ import type { ErrorObject } from 'ajv';
 
 const EMPTY: ErrorObject[] = reactive([]);
 
-const getSchemaGeneratorInput = (data: any) => (data === undefined ? {} : data);
 const generateUISchema = (schema: JsonSchema) =>
   Generate.uiSchema(schema, undefined, undefined, schema);
 
@@ -124,7 +123,7 @@ export default defineComponent({
   data() {
     const dataToUse = this.data;
     const schemaToUse: JsonSchema =
-      this.schema ?? Generate.jsonSchema(getSchemaGeneratorInput(dataToUse));
+      this.schema ?? Generate.jsonSchema(dataToUse);
     const uischemaToUse = this.uischema ?? generateUISchema(schemaToUse);
     const initCore = (): JsonFormsCore => {
       const initialCore = {
@@ -185,9 +184,7 @@ export default defineComponent({
   },
   watch: {
     schema(newSchema) {
-      this.schemaToUse =
-        newSchema ??
-        Generate.jsonSchema(getSchemaGeneratorInput(this.dataToUse));
+      this.schemaToUse = newSchema ?? Generate.jsonSchema(this.dataToUse);
       if (!this.uischema) {
         this.uischemaToUse = generateUISchema(this.schemaToUse);
       }
@@ -199,10 +196,8 @@ export default defineComponent({
       const isSameAsCurrentData = newData === this.jsonforms.core.data;
       this.dataToUse = newData;
 
-      if (!this.schema && !isSameAsCurrentData) {
-        const nextSchema = Generate.jsonSchema(
-          getSchemaGeneratorInput(this.dataToUse)
-        );
+      if (this.schema === undefined && !isSameAsCurrentData) {
+        const nextSchema = Generate.jsonSchema(this.dataToUse);
         if (!isEqual(nextSchema, this.schemaToUse)) {
           this.schemaToUse = nextSchema;
           if (!this.uischema) {
@@ -267,7 +262,8 @@ export default defineComponent({
     },
   },
   mounted() {
-    // emit an inital change so clients can react to error validation and default data insertion
+    // emit an initial change so clients can react to error validation and default data insertion
+    this.$emit('update:data', this.jsonforms.core.data);
     this.$emit('change', {
       data: this.jsonforms.core.data,
       errors: this.jsonforms.core.errors,
