@@ -20,6 +20,28 @@ export const composePropertyPath = (
   propertyName: string,
 ): string => (parentPath ? `${parentPath}.${propertyName}` : propertyName);
 
+export const getPathAncestorPaths = (
+  rootPath: string,
+  targetPath: string,
+): string[] => {
+  const relativePath =
+    rootPath && targetPath.startsWith(`${rootPath}.`)
+      ? targetPath.slice(rootPath.length + 1)
+      : targetPath === rootPath
+        ? ''
+        : targetPath;
+  const segments = relativePath.split('.').filter(Boolean);
+  const ancestors = [rootPath];
+  let currentPath = rootPath;
+
+  segments.slice(0, -1).forEach((segment) => {
+    currentPath = composePropertyPath(currentPath, segment);
+    ancestors.push(currentPath);
+  });
+
+  return ancestors;
+};
+
 export const getAdditionalPropertyNames = (
   data: Record<string, unknown> | undefined,
   reservedPropertyNames: string[],

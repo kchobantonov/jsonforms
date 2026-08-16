@@ -81,11 +81,11 @@
                           v-model="renameValue"
                           class="mixed-rename-input"
                           density="compact"
-                          hide-details
+                          hide-details="auto"
                           autofocus
-                          :error="Boolean(renameError)"
-                          :title="renameError ?? undefined"
+                          :error-messages="renameError ? [renameError] : []"
                           v-bind="vuetifyProps('v-text-field')"
+                          @update:model-value="updateRenameError(item)"
                           @click.stop
                           @keydown.stop.enter="commitRename(item)"
                           @keydown.stop.esc="cancelRename"
@@ -227,7 +227,6 @@
               :aria-label="mixedTranslations.viewAriaLabel(computedLabel)"
               variant="text"
               color="primary"
-              :disabled="!navigationContext"
               @click="selectCurrentPath"
             />
           </template>
@@ -283,17 +282,11 @@ import {
   getMixedRendererTranslations,
 } from '@/i18n/i18nUtil';
 import {
-  Resolve,
-  createControlElement,
   createDefaultValue,
-  findUISchema,
   getI18nKeyPrefix,
   resolveData,
   type ControlElement,
-  type JsonFormsUISchemaRegistryEntry,
   type JsonSchema,
-  type JsonSchema7,
-  type UISchemaElement,
 } from '@jsonforms/core';
 import {
   DispatchRenderer,
@@ -305,10 +298,6 @@ import {
   type RendererProps,
 } from '@jsonforms/vue';
 import type { ErrorObject } from 'ajv';
-import cloneDeep from 'lodash/cloneDeep';
-import get from 'lodash/get';
-import isEqual from 'lodash/isEqual';
-import set from 'lodash/set';
 import {
   computed,
   defineComponent,
@@ -341,6 +330,7 @@ import {
   composePropertyPath,
   findPropertySchema,
   getDynamicPropertyNameErrorMessage,
+  getPathAncestorPaths,
   getPropertyNameSchema,
   validateDynamicPropertyName,
 } from '../util/dynamicProperties';
@@ -351,54 +341,19 @@ import {
   useIcons,
   useVuetifyControl,
 } from '../util';
-
-type JsonDataType =
-  | 'array'
-  | 'boolean'
-  | 'integer'
-  | 'null'
-  | 'number'
-  | 'object'
-  | 'string';
-
-const JSON_TYPES: JsonDataType[] = [
-  'array',
-  'boolean',
-  'integer',
-  'null',
-  'number',
-  'object',
-  'string',
-];
-
-interface SchemaRenderInfo {
-  schema: JsonSchema;
-  resolvedSchema: JsonSchema;
-  uischema: UISchemaElement;
-  label: string;
-}
-
-interface TreeNodeControl {
-  id: string;
-  schema: JsonSchema;
-  uischema: ControlElement;
-  path: string;
-  label: string;
-  required: boolean;
-  enabled: boolean;
-  readonly: boolean;
-}
-
-interface MixedTreeNode {
-  nodeId: string;
-  title: string;
-  jsonType: JsonDataType;
-  label: string;
-  canRename: boolean;
-  canDelete: boolean;
-  control: TreeNodeControl;
-  children?: MixedTreeNode[];
-}
+import {
+  buildTreeFromData,
+  createMixedRenderInfos,
+  findNodeById,
+  flattenTree,
+  getJsonDataType,
+  resolveSchema,
+  schemaSupportsInputType,
+  toTreeNodeId,
+  type JsonDataType,
+  type MixedTreeNode,
+  type SchemaRenderInfo,
+} from '../util/mixedTree';
 
 interface NavigationContext {
   selectPath: (path: string) => void;
@@ -407,568 +362,6 @@ interface NavigationContext {
 const NavigationContextSymbol: InjectionKey<NavigationContext> = Symbol.for(
   'jsonforms-vue-vuetify:MixedRendererNavigationContext',
 );
-
-const ROOT_TREE_NODE_ID = '$root';
-const toTreeNodeId = (path: string) =>
-  path ? `$path:${path}` : ROOT_TREE_NODE_ID;
-
-function resolveSchema(schema: JsonSchema, rootSchema: JsonSchema): JsonSchema {
-  if (typeof schema?.$ref === 'string') {
-    return Resolve.schema(rootSchema, schema.$ref, rootSchema) ?? schema;
-  }
-  return schema;
-}
-
-function cleanSchema(schema: JsonSchema): JsonSchema {
-  const validKeywords: Record<string, string[]> = {
-    array: ['items', 'minItems', 'maxItems', 'uniqueItems', 'contains'],
-    object: [
-      'properties',
-      'required',
-      'additionalProperties',
-      'minProperties',
-      'maxProperties',
-      'patternProperties',
-      'dependencies',
-      'propertyNames',
-    ],
-    string: ['minLength', 'maxLength', 'pattern', 'format'],
-    number: [
-      'minimum',
-      'maximum',
-      'exclusiveMinimum',
-      'exclusiveMaximum',
-      'multipleOf',
-    ],
-    integer: [
-      'minimum',
-      'maximum',
-      'exclusiveMinimum',
-      'exclusiveMaximum',
-      'multipleOf',
-    ],
-    boolean: [],
-    null: [],
-  };
-
-  const schemaType = schema.type as string;
-  for (const validType in validKeywords) {
-    if (validType !== schemaType) {
-      validKeywords[validType].forEach((key) => {
-        delete (schema as any)[key];
-      });
-    }
-  }
-
-  return schema;
-}
-
-function getSchemaTypesAsArray(schema: JsonSchema): string[] {
-  if (typeof schema.type === 'string') {
-    return [schema.type];
-  }
-
-  if (Array.isArray(schema.type)) {
-    return schema.type;
-  }
-
-  if (Array.isArray(schema.enum)) {
-    const enumTypes = new Set(
-      schema.enum.map((value) => getJsonDataType(value)),
-    );
-    if (!enumTypes.has(null)) {
-      return Array.from(enumTypes).filter((type) => type !== null) as string[];
-    }
-  }
-
-  return [...JSON_TYPES];
-}
-
-const createMixedRenderInfos = (
-  parentSchema: JsonSchema,
-  schema: JsonSchema,
-  rootSchema: JsonSchema,
-  control: ControlElement,
-  path: string,
-  uischemas: JsonFormsUISchemaRegistryEntry[],
-): SchemaRenderInfo[] => {
-  let resolvedSchemas: JsonSchema[] = [];
-  schema = resolveSchema(schema, rootSchema);
-
-  if (typeof schema.type === 'string') {
-    resolvedSchemas.push(schema);
-  } else {
-    const types = getSchemaTypesAsArray(schema);
-
-    types.forEach((type) => {
-      resolvedSchemas.push({
-        ...schema,
-        type,
-        default:
-          schema.default !== undefined &&
-          type === getJsonDataType(schema.default)
-            ? schema.default
-            : undefined,
-      });
-    });
-  }
-
-  return resolvedSchemas.map((sourceSchema) => {
-    const resolvedSchema = cloneDeep(sourceSchema);
-    if (resolvedSchema.type === 'array') {
-      resolvedSchema.items = resolvedSchema.items ?? {};
-      resolvedSchema.items = cloneDeep(
-        resolveSchema(resolvedSchema.items as JsonSchema, rootSchema),
-      );
-
-      if ((resolvedSchema.items as any) === true) {
-        resolvedSchema.items = {
-          type: [...JSON_TYPES],
-        };
-      } else if (
-        typeof (resolvedSchema.items as JsonSchema7).type !== 'string' &&
-        !Array.isArray((resolvedSchema.items as JsonSchema7).type)
-      ) {
-        (resolvedSchema.items as JsonSchema7).type = [...JSON_TYPES];
-      }
-    }
-
-    let cleanedSchema = cleanSchema(cloneDeep(resolvedSchema));
-
-    const detailsForSchema = control.options
-      ? control.options[cleanedSchema.type + '-detail']
-      : undefined;
-
-    const schemaControl = detailsForSchema
-      ? {
-          ...control,
-          options: { ...control.options, detail: detailsForSchema },
-        }
-      : control;
-
-    if (
-      control.scope &&
-      (cleanedSchema.type === 'object' || cleanedSchema.type === 'array')
-    ) {
-      const segments = control.scope.split('/');
-      const startFromRoot = segments[0] === '#' || segments[0] === '';
-      const startIndex = startFromRoot ? 1 : 0;
-
-      if (segments.length > startIndex) {
-        const schemaPath = segments.slice(startIndex).join('.');
-        if (schemaPath && isEqual(get(parentSchema, schemaPath), schema)) {
-          const newSchema = cloneDeep(parentSchema);
-          set(newSchema, schemaPath, cleanedSchema);
-          cleanedSchema = newSchema;
-        }
-      }
-    }
-
-    const uischema = findUISchema(
-      uischemas,
-      cleanedSchema,
-      control.scope,
-      path,
-      () => createControlElement(control.scope ?? '#'),
-      schemaControl,
-      rootSchema,
-    );
-
-    return {
-      schema: cleanedSchema,
-      resolvedSchema,
-      uischema,
-      label: `${resolvedSchema.type}`,
-    };
-  });
-};
-
-export function getJsonDataType(value: any): JsonDataType | null {
-  if (typeof value === 'string') {
-    return 'string';
-  } else if (typeof value === 'number') {
-    return Number.isInteger(value) ? 'integer' : 'number';
-  } else if (typeof value === 'boolean') {
-    return 'boolean';
-  } else if (Array.isArray(value)) {
-    return 'array';
-  } else if (value === null) {
-    return 'null';
-  } else if (typeof value === 'object') {
-    return 'object';
-  }
-
-  return null;
-}
-
-function schemaSupportsInputType(
-  schemaType: JsonSchema['type'] | undefined,
-  dataType: JsonDataType | null,
-): boolean {
-  if (!dataType || typeof schemaType !== 'string') {
-    return false;
-  }
-
-  return (
-    schemaType === dataType ||
-    (schemaType === 'number' && dataType === 'integer')
-  );
-}
-
-function getArrayItemSchema(
-  parentSchema: JsonSchema,
-  index: number,
-  rootSchema: JsonSchema,
-): JsonSchema | undefined {
-  if (!parentSchema.items) {
-    return undefined;
-  }
-
-  let itemSchema: JsonSchema | undefined;
-  if (Array.isArray(parentSchema.items)) {
-    if (index < parentSchema.items.length) {
-      itemSchema = parentSchema.items[index];
-    } else if (parentSchema.additionalItems) {
-      itemSchema =
-        typeof parentSchema.additionalItems === 'object'
-          ? parentSchema.additionalItems
-          : undefined;
-    }
-  } else {
-    itemSchema = parentSchema.items as JsonSchema;
-  }
-
-  return itemSchema ? resolveSchema(itemSchema, rootSchema) : undefined;
-}
-
-function prepareObjectSchema(schema: JsonSchema): JsonSchema {
-  const objectSchema = cleanSchema(cloneDeep({ ...schema, type: 'object' }));
-  objectSchema.additionalProperties =
-    objectSchema.additionalProperties !== false
-      ? (objectSchema.additionalProperties ?? true)
-      : false;
-  return objectSchema;
-}
-
-function prepareArraySchema(
-  schema: JsonSchema,
-  rootSchema: JsonSchema,
-): JsonSchema {
-  const arraySchema = cleanSchema(cloneDeep({ ...schema, type: 'array' }));
-  arraySchema.items = arraySchema.items ?? {};
-  arraySchema.items = cloneDeep(
-    resolveSchema(arraySchema.items as JsonSchema, rootSchema),
-  );
-
-  if ((arraySchema.items as any) === true) {
-    arraySchema.items = {
-      type: [...JSON_TYPES],
-    };
-  } else if (
-    typeof (arraySchema.items as JsonSchema7).type !== 'string' &&
-    !Array.isArray((arraySchema.items as JsonSchema7).type)
-  ) {
-    (arraySchema.items as JsonSchema7).type = [...JSON_TYPES];
-  }
-
-  return arraySchema;
-}
-
-function prepareChildSchema(
-  childType: JsonDataType,
-  currentSchema: JsonSchema,
-  key: string,
-  index: number | null,
-  rootSchema: JsonSchema,
-  itemLabel?: string,
-): JsonSchema {
-  let childSchema: JsonSchema | undefined;
-
-  if (index !== null) {
-    childSchema = getArrayItemSchema(currentSchema, index, rootSchema);
-    childSchema = childSchema
-      ? { ...childSchema, title: itemLabel }
-      : {
-          type: [...JSON_TYPES],
-          title: itemLabel,
-        };
-  } else {
-    childSchema = findPropertySchema(currentSchema, key, rootSchema);
-    childSchema = childSchema
-      ? { ...childSchema, title: key }
-      : {
-          type: [...JSON_TYPES],
-          title: key,
-        };
-  }
-
-  if (
-    childType !== 'object' &&
-    childType !== 'array' &&
-    (!childSchema.type || (childSchema.type as any) === true)
-  ) {
-    childSchema.type = [...JSON_TYPES];
-  }
-
-  if (childType === 'object') {
-    return prepareObjectSchema(childSchema);
-  }
-
-  if (childType === 'array') {
-    return prepareArraySchema(childSchema, rootSchema);
-  }
-
-  return childSchema;
-}
-
-function createFallbackChildSchema(title: string): JsonSchema {
-  return {
-    type: [...JSON_TYPES],
-    title,
-  };
-}
-
-function getSchemaDefaultType(schema: JsonSchema): JsonDataType {
-  const schemaTypes = getSchemaTypesAsArray(schema);
-  const firstType =
-    schemaTypes.find((type) => type !== 'null') ?? schemaTypes[0];
-  return (firstType ?? 'object') as JsonDataType;
-}
-
-function createTreeNodeControl(
-  schema: JsonSchema,
-  path: string,
-  label: string,
-  enabled: boolean,
-  readonly: boolean,
-): TreeNodeControl {
-  return {
-    id: path,
-    schema,
-    uischema: createControlElement('#'),
-    path,
-    label,
-    required: false,
-    enabled,
-    readonly,
-  };
-}
-
-function withoutEmptyChildren(node: MixedTreeNode): MixedTreeNode {
-  const children = node.children?.map(withoutEmptyChildren) ?? [];
-  if (children.length === 0) {
-    const rest = { ...node };
-    delete rest.children;
-    return rest;
-  }
-  return {
-    ...node,
-    children,
-  };
-}
-
-function getDisplayTitle(label: string, type: JsonDataType): string {
-  if (label) {
-    return label;
-  }
-  return type === 'array' ? '[]' : '{}';
-}
-
-function isDynamicProperty(parentSchema: JsonSchema, key: string): boolean {
-  return !parentSchema.properties?.[key];
-}
-
-function buildTreeFromData(
-  data: any,
-  schema: JsonSchema,
-  rootSchema: JsonSchema,
-  path: string,
-  label: string,
-  enabled: boolean,
-  readonly: boolean,
-  showPrimitives: boolean,
-  itemLabel: (index: number) => string,
-): MixedTreeNode[] {
-  const dataType = getJsonDataType(data);
-  if (dataType !== 'object' && dataType !== 'array') {
-    return [];
-  }
-
-  const nodes: MixedTreeNode[] = [];
-
-  function traverse(
-    value: any,
-    currentPath: string,
-    currentLabel: string,
-    currentSchema: JsonSchema,
-    children: MixedTreeNode[],
-    canRename = false,
-    canDelete = false,
-  ) {
-    const type = getJsonDataType(value);
-
-    if (type === 'object') {
-      const objectSchema = prepareObjectSchema(currentSchema);
-      const nodeId = toTreeNodeId(currentPath);
-      const node: MixedTreeNode = {
-        nodeId,
-        title: getDisplayTitle(currentLabel, type),
-        jsonType: type,
-        label: currentLabel,
-        canRename,
-        canDelete,
-        control: createTreeNodeControl(
-          objectSchema,
-          currentPath,
-          currentLabel,
-          enabled,
-          readonly,
-        ),
-        children: [],
-      };
-      children.push(node);
-
-      Object.keys(value).forEach((key) => {
-        const childValue = value[key];
-        const childPath = composePropertyPath(currentPath, key);
-        const rawChildType = getJsonDataType(childValue);
-        const childCanRename = isDynamicProperty(currentSchema, key);
-        const childCanDelete = true;
-        const initialChildSchema =
-          findPropertySchema(currentSchema, key, rootSchema) ??
-          createFallbackChildSchema(key);
-        const childType =
-          rawChildType ?? getSchemaDefaultType(initialChildSchema);
-        const childSchema = prepareChildSchema(
-          childType,
-          currentSchema,
-          key,
-          null,
-          rootSchema,
-        );
-
-        if (childType === 'object' || childType === 'array') {
-          traverse(
-            childValue ?? (childType === 'array' ? [] : {}),
-            childPath,
-            key,
-            childSchema,
-            node.children!,
-            childCanRename,
-            childCanDelete,
-          );
-        } else if (showPrimitives) {
-          const nodeId = toTreeNodeId(childPath);
-          node.children!.push({
-            nodeId,
-            title: key,
-            jsonType: childType,
-            label: key,
-            canRename: childCanRename,
-            canDelete: childCanDelete,
-            control: createTreeNodeControl(
-              childSchema,
-              childPath,
-              key,
-              enabled,
-              readonly,
-            ),
-            children: [],
-          });
-        }
-      });
-    } else if (type === 'array') {
-      const arraySchema = prepareArraySchema(currentSchema, rootSchema);
-      const nodeId = toTreeNodeId(currentPath);
-      const node: MixedTreeNode = {
-        nodeId,
-        title: getDisplayTitle(currentLabel, type),
-        jsonType: type,
-        label: currentLabel,
-        canRename,
-        canDelete,
-        control: createTreeNodeControl(
-          arraySchema,
-          currentPath,
-          currentLabel,
-          enabled,
-          readonly,
-        ),
-        children: [],
-      };
-      children.push(node);
-
-      value.forEach((childValue: any, index: number) => {
-        const childType = getJsonDataType(childValue);
-        const childPath = composePropertyPath(currentPath, `${index}`);
-        const childLabel = itemLabel(index);
-        const childSchema = prepareChildSchema(
-          childType ?? 'object',
-          currentSchema,
-          '',
-          index,
-          rootSchema,
-          childLabel,
-        );
-        const resolvedChildType =
-          childType ?? getSchemaDefaultType(childSchema);
-        if (resolvedChildType === 'object' || resolvedChildType === 'array') {
-          traverse(
-            childValue ?? (resolvedChildType === 'array' ? [] : {}),
-            childPath,
-            childLabel,
-            childSchema,
-            node.children!,
-            false,
-            true,
-          );
-        } else if (showPrimitives) {
-          const nodeId = toTreeNodeId(childPath);
-          node.children!.push({
-            nodeId,
-            title: childLabel,
-            jsonType: resolvedChildType,
-            label: childLabel,
-            canRename: false,
-            canDelete: true,
-            control: createTreeNodeControl(
-              childSchema,
-              childPath,
-              childLabel,
-              enabled,
-              readonly,
-            ),
-            children: [],
-          });
-        }
-      });
-    }
-  }
-
-  traverse(data, path, label, resolveSchema(schema, rootSchema), nodes);
-
-  return nodes.map(withoutEmptyChildren);
-}
-
-function flattenTree(nodes: MixedTreeNode[]): MixedTreeNode[] {
-  return nodes.flatMap((node) => [node, ...flattenTree(node.children ?? [])]);
-}
-
-function findNodeByPath(
-  nodes: MixedTreeNode[],
-  targetPath: string,
-): MixedTreeNode | undefined {
-  for (const node of nodes) {
-    if (node.nodeId === targetPath) {
-      return node;
-    }
-    const child = findNodeByPath(node.children ?? [], targetPath);
-    if (child) {
-      return child;
-    }
-  }
-  return undefined;
-}
 
 const controlRenderer = defineComponent({
   name: 'mixed-renderer',
@@ -1143,30 +536,23 @@ const controlRenderer = defineComponent({
     );
 
     const selectedNode = computed(() =>
-      findNodeByPath(treeNodes.value, activeNodeId.value),
+      findNodeById(treeNodes.value, activeNodeId.value),
     );
 
     const activatedTreeNodes = computed<string[]>({
       get: () => [activeNodeId.value],
       set: (value) => {
         const nodeId = value[0];
-        if (nodeId && findNodeByPath(treeNodes.value, nodeId)) {
+        if (nodeId && findNodeById(treeNodes.value, nodeId)) {
           activeNodeId.value = nodeId;
         }
       },
     });
 
     const getPathAncestorNodeIds = (path: string): string[] => {
-      const segments = path.split('.').filter(Boolean);
-      const result = [toTreeNodeId(input.control.value.path)];
-      let currentPath = input.control.value.path;
-
-      segments.slice(0, -1).forEach((segment) => {
-        currentPath = composePropertyPath(currentPath, segment);
-        result.push(toTreeNodeId(currentPath));
-      });
-
-      return result;
+      return getPathAncestorPaths(input.control.value.path, path).map(
+        toTreeNodeId,
+      );
     };
 
     const selectPath = (path: string) => {
@@ -1293,6 +679,46 @@ const controlRenderer = defineComponent({
       renameError.value = null;
     };
 
+    const validateRename = (node: MixedTreeNode): string | null => {
+      const propertyName = renameValue.value.trim();
+      const parentPath = getParentPath(node.control.path);
+      const parentRelativePath = getRelativePath(parentPath);
+      const parentData =
+        parentRelativePath === null
+          ? input.control.value.data
+          : resolveData(input.control.value.data, parentRelativePath);
+      const parentSchema = getParentSchema(parentPath);
+      const resolvedParentSchema = parentSchema
+        ? resolveSchema(parentSchema, input.control.value.rootSchema)
+        : {};
+      const validationError = validateDynamicPropertyName({
+        propertyName,
+        currentPropertyName: node.label,
+        data: parentData,
+        propertyNameSchema: getPropertyNameSchema(
+          resolvedParentSchema,
+          input.control.value.rootSchema,
+        ),
+        ajv,
+      });
+
+      return getDynamicPropertyNameErrorMessage(validationError, {
+        alreadyDefined: translateAdditionalProperty(
+          AdditionalPropertiesTranslationEnum.propertyAlreadyDefined,
+          propertyName,
+        ),
+        invalid: translateAdditionalProperty(
+          AdditionalPropertiesTranslationEnum.propertyNameInvalid,
+          propertyName,
+        ),
+        schema: translatePropertyNameSchemaError,
+      });
+    };
+
+    const updateRenameError = (node: MixedTreeNode) => {
+      renameError.value = validateRename(node);
+    };
+
     const commitRename = (node: MixedTreeNode) => {
       if (renamingNodeId.value !== node.nodeId) {
         return;
@@ -1320,35 +746,7 @@ const controlRenderer = defineComponent({
         return;
       }
 
-      let parentSchema = getParentSchema(parentPath);
-      if (parentSchema) {
-        parentSchema = resolveSchema(
-          parentSchema,
-          input.control.value.rootSchema,
-        );
-      }
-
-      const validationError = validateDynamicPropertyName({
-        propertyName: trimmed,
-        currentPropertyName: node.label,
-        data: parentData,
-        propertyNameSchema: getPropertyNameSchema(
-          parentSchema ?? {},
-          input.control.value.rootSchema,
-        ),
-        ajv,
-      });
-      renameError.value = getDynamicPropertyNameErrorMessage(validationError, {
-        alreadyDefined: translateAdditionalProperty(
-          AdditionalPropertiesTranslationEnum.propertyAlreadyDefined,
-          trimmed,
-        ),
-        invalid: translateAdditionalProperty(
-          AdditionalPropertiesTranslationEnum.propertyNameInvalid,
-          trimmed,
-        ),
-        schema: translatePropertyNameSchemaError,
-      });
+      renameError.value = validateRename(node);
       if (renameError.value) {
         return;
       }
@@ -1477,10 +875,10 @@ const controlRenderer = defineComponent({
       renameValue,
       renameError,
       mixedTranslations,
-      navigationContext,
       toggleShowPrimitives,
       startRename,
       cancelRename,
+      updateRenameError,
       commitRename,
       deleteNode,
       handleSelectChange,

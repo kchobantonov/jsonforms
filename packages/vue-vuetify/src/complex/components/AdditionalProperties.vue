@@ -66,7 +66,7 @@
       class="additional-properties-items py-0"
     >
       <div
-        :class="additionalPropertyRowClasses(element)"
+        class="additional-property-row"
         v-for="element in additionalPropertyItems"
         :key="`${element.propertyName}`"
       >
@@ -564,22 +564,6 @@ export default defineComponent({
     },
   },
   methods: {
-    additionalPropertyRowClasses(element: AdditionalPropertyType): string[] {
-      const schemaType = element.schema?.type;
-      const classes = ['additional-property-row'];
-
-      if (Array.isArray(schemaType)) {
-        classes.push('additional-property-row--mixed');
-      } else if (schemaType === 'object') {
-        classes.push('additional-property-row--object');
-      } else if (schemaType === 'array') {
-        classes.push('additional-property-row--array');
-      } else {
-        classes.push('additional-property-row--primitive');
-      }
-
-      return classes;
-    },
     validatePropertyName(
       propertyName: string,
       currentPropertyName?: string,

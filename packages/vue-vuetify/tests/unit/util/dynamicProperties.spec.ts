@@ -4,6 +4,7 @@ import {
   composePropertyPath,
   findPropertySchema,
   getDynamicPropertyNameErrorMessage,
+  getPathAncestorPaths,
   getPropertyNameSchema,
   haveAdditionalPropertyNamesChanged,
   validateDynamicPropertyName,
@@ -22,6 +23,20 @@ describe('dynamic property utilities', () => {
       },
     },
   };
+
+  describe('getPathAncestorPaths', () => {
+    it('derives ancestors from an absolute nested control path', () => {
+      expect(getPathAncestorPaths('dynamic', 'dynamic.a.b')).toEqual([
+        'dynamic',
+        'dynamic.a',
+      ]);
+    });
+
+    it('supports root-scoped controls and selecting the root itself', () => {
+      expect(getPathAncestorPaths('', 'a.b')).toEqual(['', 'a']);
+      expect(getPathAncestorPaths('dynamic', 'dynamic')).toEqual(['dynamic']);
+    });
+  });
 
   describe('findPropertySchema', () => {
     it('prefers a matching pattern over additionalProperties: true', () => {
