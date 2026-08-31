@@ -2,7 +2,7 @@
   <div v-if="control.visible" class="mixed-renderer">
     <template v-if="showTreeView">
       <v-expansion-panels v-model="currentlyExpanded" flat>
-        <v-expansion-panel>
+        <v-expansion-panel value="mixed-details">
           <v-expansion-panel-title class="py-0 px-0">
             <v-container class="py-0">
               <v-row>
@@ -404,7 +404,7 @@ const controlRenderer = defineComponent({
     const activeNodeId = ref(toTreeNodeId(input.control.value.path));
     const openedNodes = ref<string[]>([]);
     const treeSearch = ref('');
-    const currentlyExpanded = ref<number | null>(0);
+    const currentlyExpanded = ref<string | null>('mixed-details');
     const showPrimitivesInTree = ref(false);
     const renamingNodeId = ref<string | null>(null);
     const renameValue = ref('');
@@ -819,7 +819,8 @@ const controlRenderer = defineComponent({
           : null;
       valueType.value = type as JsonDataType | null;
       activeNodeId.value = toTreeNodeId(input.control.value.path);
-      currentlyExpanded.value = 0;
+      currentlyExpanded.value =
+        type === 'object' || type === 'array' ? 'mixed-details' : null;
     };
 
     const selectCurrentPath = () => {
